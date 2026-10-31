@@ -105,4 +105,3 @@ jobs:
               Write-Host "[$(Get-Date)] RDP Active via Cloudflare - Tunnel: $url"
               Start-Sleep -Seconds 300
           }
-path: .github/workflows/main.yml
