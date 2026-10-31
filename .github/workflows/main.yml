@@ -1,82 +1,101 @@
-name: RDP
+name: AnyDesk Remote Access
 on:
   workflow_dispatch:
 jobs:
-  secure-rdp:
+  anydesk:
     runs-on: windows-latest
     timeout-minutes: 3600
     steps:
-      - name: Configure Core RDP Settings
+      - name: Install AnyDesk (silent)
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP User with Static Password
-        run: |
-          $password = "admin@123"
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-
-          if (-not (Get-LocalUser -Name "TOOLBOXLAP" -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name "TOOLBOXLAP" -Password $securePass -AccountNeverExpires
-          }
-
-          Add-LocalGroupMember -Group "Administrators" -Member "TOOLBOXLAP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "TOOLBOXLAP"
-
-          echo "RDP_CREDS=User: TOOLBOXLAP | Password: $password" >> $env:GITHUB_ENV
-
-          if (-not (Get-LocalUser -Name "TOOLBOXLAP")) {
-              Write-Error "User creation failed"
+          $adUrl = "https://download.anydesk.com/AnyDesk.exe"
+          $adInstaller = "C:\AnyDesk.exe"
+          Invoke-WebRequest -Uri $adUrl -OutFile $adInstaller
+          & $adInstaller --install "C:\AnyDesk" --silent
+          Start-Sleep -Seconds 5
+          if (-not (Test-Path "C:\AnyDesk\AnyDesk.exe")) {
+              Write-Error "AnyDesk installation failed"
               exit 1
           }
+          Write-Host "AnyDesk installed."
 
-      - name: Install Tailscale
+      - name: Configure Unattended Access (password)
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-
-      - name: Establish Tailscale Connection
-        run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
+          $adExe = "C:\AnyDesk\AnyDesk.exe"
+          # Start AnyDesk service if not running
+          Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 5
+          # AnyDesk --set-password reads password from stdin
+          "admin@123" | & $adExe --set-password
+          Start-Sleep -Seconds 5
+          # Try CLI get-id
+          $id = & $adExe --get-id 2>$null
+          if (-not $id) {
+              # Search config files for AnyDesk ID
+              $searchPaths = @(
+                  "C:\ProgramData\AnyDesk\system.conf",
+                  "$env:APPDATA\AnyDesk\user.conf",
+                  "C:\AnyDesk\system.conf",
+                  "C:\AnyDesk\user.conf"
+              )
+              foreach ($p in $searchPaths) {
+                  if (Test-Path $p) {
+                      Write-Host "Found config: $p"
+                      $content = Get-Content $p
+                      Write-Host $content
+                      $line = $content | Select-String -Pattern "ad\.anynet\.id\s*=" | Select-Object -First 1
+                      if ($line) {
+                          $id = ($line -split "=")[1].Trim()
+                          break
+                      }
+                  }
+              }
+              # Fallback: search all AnyDesk dirs
+              if (-not $id) {
+                  Get-ChildItem -Path "C:\AnyDesk","C:\ProgramData\AnyDesk" -Recurse -Filter "*.conf" -ErrorAction SilentlyContinue | ForEach-Object {
+                      $c = Get-Content $_.FullName -ErrorAction SilentlyContinue
+                      $l = $c | Select-String -Pattern "ad\.anynet\.id\s*=" | Select-Object -First 1
+                      if ($l -and -not $id) {
+                          Write-Host "Found in $($_.FullName): $l"
+                          $id = ($l -split "=")[1].Trim()
+                      }
+                  }
+              }
           }
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
+          if (-not $id) {
+              Write-Error "Could not determine AnyDesk ID"
               exit 1
           }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "ANYDESK_ID=$id"
+          echo "ANYDESK_ID=$id" >> $env:GITHUB_ENV
+          echo $id | Out-File -FilePath "anydesk-id.txt" -Encoding ascii -NoNewline
 
-      - name: Verify RDP Accessibility
+      - name: Show Connection Info
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
+          $id = $env:ANYDESK_ID
+          Write-Host ""
+          Write-Host "=== ANYDESK ACCESS ==="
+          Write-Host "AnyDesk ID : $id"
+          Write-Host "Password   : admin@123"
+          Write-Host "======================"
+          Write-Host ""
+          Write-Host "On your device (AnyDesk app), enter the ID above and the password."
+          # Prominent summary
+          "## AnyDesk Access" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- **AnyDesk ID:** ``$id``" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- **Password:** ``admin@123``" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
-      - name: Maintain Connection
+      - name: Upload AnyDesk ID
+        uses: actions/upload-artifact@v4
+        with:
+          name: anydesk-id
+          path: anydesk-id.txt
+          retention-days: 1
+
+      - name: Keep Alive
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: TOOLBOXLAP"
-          Write-Host "Password: admin@123"
-          Write-Host "==================`n"
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Write-Host "[$(Get-Date)] AnyDesk Active - ID: $env:ANYDESK_ID"
               Start-Sleep -Seconds 300
           }
