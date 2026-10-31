@@ -1,107 +1,46 @@
-name: RDP via Cloudflare
+name: AnyDesk Remote Access
 on:
   workflow_dispatch:
 jobs:
-  secure-rdp:
+  anydesk:
     runs-on: windows-latest
     timeout-minutes: 3600
     steps:
-      - name: Configure Core RDP Settings
+      - name: Install AnyDesk (silent)
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Cloudflare"
-          netsh advfirewall firewall add rule name="RDP-Cloudflare" dir=in action=allow protocol=TCP localport=3389
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP User with Static Password
-        run: |
-          $password = "admin@123"
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-
-          if (-not (Get-LocalUser -Name "TOOLBOXLAP" -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name "TOOLBOXLAP" -Password $securePass -AccountNeverExpires
-          }
-
-          Add-LocalGroupMember -Group "Administrators" -Member "TOOLBOXLAP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "TOOLBOXLAP"
-
-          if (-not (Get-LocalUser -Name "TOOLBOXLAP")) {
-              Write-Error "User creation failed"
+          $adUrl = "https://download.anydesk.com/AnyDesk.exe"
+          $adInstaller = "C:\AnyDesk.exe"
+          Invoke-WebRequest -Uri $adUrl -OutFile $adInstaller
+          & $adInstaller --install "C:\AnyDesk" --silent
+          Start-Sleep -Seconds 5
+          if (-not (Test-Path "C:\AnyDesk\AnyDesk.exe")) {
+              Write-Error "AnyDesk installation failed"
               exit 1
           }
+          Write-Host "AnyDesk installed."
 
-      - name: Install Cloudflare Tunnel (cloudflared)
+      - name: Configure Unattended Access (password)
         run: |
-          $cfUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-          $cfPath = "C:\cloudflared.exe"
+          $adExe = "C:\AnyDesk\AnyDesk.exe"
+          & $adExe --set-password "admin@123"
+          Start-Sleep -Seconds 3
+          $id = & $adExe --get-id
+          Write-Host "ANYDESK_ID=$id"
+          echo "ANYDESK_ID=$id" >> $env:GITHUB_ENV
 
-          Invoke-WebRequest -Uri $cfUrl -OutFile $cfPath
-          & $cfPath --version
-
-      - name: Verify RDP Accessibility
+      - name: Show Connection Info
         run: |
-          $testResult = Test-NetConnection -ComputerName "localhost" -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity to local RDP port 3389 successful!"
+          Write-Host ""
+          Write-Host "=== ANYDESK ACCESS ==="
+          Write-Host "AnyDesk ID : $env:ANYDESK_ID"
+          Write-Host "Password   : admin@123"
+          Write-Host "======================"
+          Write-Host ""
+          Write-Host "On your device (AnyDesk app), enter the ID above and the password."
 
-      - name: Maintain Connection (Cloudflare Tunnel)
+      - name: Keep Alive
         run: |
-          $cfPath = "C:\cloudflared.exe"
-          $logOut = "$env:TEMP\cloudflared.out"
-          $logErr = "$env:TEMP\cloudflared.err"
-          if (Test-Path $logOut) { Remove-Item $logOut -Force }
-          if (Test-Path $logErr) { Remove-Item $logErr -Force }
-
-          $proc = Start-Process -FilePath $cfPath -ArgumentList "tunnel","--url","rdp://localhost:3389" -RedirectStandardOutput $logOut -RedirectStandardError $logErr -PassThru -WindowStyle Hidden
-
-          $url = $null
-          for ($i = 0; $i -lt 60; $i++) {
-              Start-Sleep -Seconds 2
-              $content = @()
-              if (Test-Path $logOut) { $content += Get-Content $logOut }
-              if (Test-Path $logErr) { $content += Get-Content $logErr }
-              $text = $content -join "`n"
-              if ($text -match "https://[a-zA-Z0-9-]+\.trycloudflare\.com") {
-                  $url = $Matches[0]
-                  break
-              }
-          }
-
-          if (-not $url) {
-              Write-Host "=== cloudflared stdout ==="
-              if (Test-Path $logOut) { Get-Content $logOut }
-              Write-Host "=== cloudflared stderr ==="
-              if (Test-Path $logErr) { Get-Content $logErr }
-              Write-Error "Cloudflare Tunnel URL not found"
-              exit 1
-          }
-
-          $hostName = $url -replace "https://", ""
-
-          Write-Host ""
-          Write-Host "=== RDP ACCESS (Cloudflare) ==="
-          Write-Host "Tunnel URL : $url"
-          Write-Host ""
-          Write-Host "On your PC (client), run:"
-          Write-Host "  cloudflared access rdp --hostname $hostName --url rdp://localhost:3390"
-          Write-Host ""
-          Write-Host "Then open Remote Desktop (mstsc) and connect to: localhost:3390"
-          Write-Host "Username : TOOLBOXLAP"
-          Write-Host "Password : admin@123"
-          Write-Host "==============================="
-          Write-Host ""
-
           while ($true) {
-              if ($proc.HasExited) {
-                  Write-Error "cloudflared process exited unexpectedly."
-                  if (Test-Path $logErr) { Get-Content $logErr -Tail 20 }
-                  exit 1
-              }
-              Write-Host "[$(Get-Date)] RDP Active via Cloudflare - Tunnel: $url"
+              Write-Host "[$(Get-Date)] AnyDesk Active - ID: $env:ANYDESK_ID"
               Start-Sleep -Seconds 300
           }
