@@ -1,4 +1,4 @@
-name: RDP
+name: RDP via Cloudflare
 on:
   workflow_dispatch:
 jobs:
@@ -11,8 +11,8 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall delete rule name="RDP-Cloudflare"
+          netsh advfirewall firewall add rule name="RDP-Cloudflare" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with Static Password
@@ -27,56 +27,82 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member "TOOLBOXLAP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "TOOLBOXLAP"
 
-          echo "RDP_CREDS=User: TOOLBOXLAP | Password: $password" >> $env:GITHUB_ENV
-
           if (-not (Get-LocalUser -Name "TOOLBOXLAP")) {
               Write-Error "User creation failed"
               exit 1
           }
 
-      - name: Install Tailscale
+      - name: Install Cloudflare Tunnel (cloudflared)
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
+          $cfUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          $cfPath = "C:\cloudflared.exe"
 
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-
-      - name: Establish Tailscale Connection
-        run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Invoke-WebRequest -Uri $cfUrl -OutFile $cfPath
+          & $cfPath --version
 
       - name: Verify RDP Accessibility
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          $testResult = Test-NetConnection -ComputerName "localhost" -Port 3389
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
               exit 1
           }
-          Write-Host "TCP connectivity successful!"
+          Write-Host "TCP connectivity to local RDP port 3389 successful!"
 
-      - name: Maintain Connection
+      - name: Maintain Connection (Cloudflare Tunnel)
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: TOOLBOXLAP"
-          Write-Host "Password: admin@123"
-          Write-Host "==================`n"
+          $cfPath = "C:\cloudflared.exe"
+          $logOut = "$env:TEMP\cloudflared.out"
+          $logErr = "$env:TEMP\cloudflared.err"
+          if (Test-Path $logOut) { Remove-Item $logOut -Force }
+          if (Test-Path $logErr) { Remove-Item $logErr -Force }
+
+          $proc = Start-Process -FilePath $cfPath -ArgumentList "tunnel","--url","rdp://localhost:3389" -RedirectStandardOutput $logOut -RedirectStandardError $logErr -PassThru -WindowStyle Hidden
+
+          $url = $null
+          for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Seconds 2
+              $content = @()
+              if (Test-Path $logOut) { $content += Get-Content $logOut }
+              if (Test-Path $logErr) { $content += Get-Content $logErr }
+              $text = $content -join "`n"
+              if ($text -match "https://[a-zA-Z0-9-]+\.trycloudflare\.com") {
+                  $url = $Matches[0]
+                  break
+              }
+          }
+
+          if (-not $url) {
+              Write-Host "=== cloudflared stdout ==="
+              if (Test-Path $logOut) { Get-Content $logOut }
+              Write-Host "=== cloudflared stderr ==="
+              if (Test-Path $logErr) { Get-Content $logErr }
+              Write-Error "Cloudflare Tunnel URL not found"
+              exit 1
+          }
+
+          $hostName = $url -replace "https://", ""
+
+          Write-Host ""
+          Write-Host "=== RDP ACCESS (Cloudflare) ==="
+          Write-Host "Tunnel URL : $url"
+          Write-Host ""
+          Write-Host "On your PC (client), run:"
+          Write-Host "  cloudflared access rdp --hostname $hostName --url rdp://localhost:3390"
+          Write-Host ""
+          Write-Host "Then open Remote Desktop (mstsc) and connect to: localhost:3390"
+          Write-Host "Username : TOOLBOXLAP"
+          Write-Host "Password : admin@123"
+          Write-Host "==============================="
+          Write-Host ""
+
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              if ($proc.HasExited) {
+                  Write-Error "cloudflared process exited unexpectedly."
+                  if (Test-Path $logErr) { Get-Content $logErr -Tail 20 }
+                  exit 1
+              }
+              Write-Host "[$(Get-Date)] RDP Active via Cloudflare - Tunnel: $url"
               Start-Sleep -Seconds 300
           }
+path: .github/workflows/main.yml
