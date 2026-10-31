@@ -25,7 +25,8 @@ jobs:
           # Start AnyDesk service if not running
           Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 5
-          & $adExe --set-password "admin@123"
+          # AnyDesk --set-password reads password from stdin
+          "admin@123" | & $adExe --set-password
           Start-Sleep -Seconds 5
           # Try CLI get-id
           $id = & $adExe --get-id 2>$null
