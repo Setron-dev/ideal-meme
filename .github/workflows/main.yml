@@ -1,6 +1,8 @@
 name: RDP via Cloudflare
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 jobs:
   secure-rdp:
     runs-on: windows-latest
