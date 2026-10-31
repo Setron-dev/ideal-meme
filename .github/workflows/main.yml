@@ -22,9 +22,49 @@ jobs:
       - name: Configure Unattended Access (password)
         run: |
           $adExe = "C:\AnyDesk\AnyDesk.exe"
+          # Start AnyDesk service if not running
+          Start-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 5
           & $adExe --set-password "admin@123"
-          Start-Sleep -Seconds 3
-          $id = & $adExe --get-id
+          Start-Sleep -Seconds 5
+          # Try CLI get-id
+          $id = & $adExe --get-id 2>$null
+          if (-not $id) {
+              # Search config files for AnyDesk ID
+              $searchPaths = @(
+                  "C:\ProgramData\AnyDesk\system.conf",
+                  "$env:APPDATA\AnyDesk\user.conf",
+                  "C:\AnyDesk\system.conf",
+                  "C:\AnyDesk\user.conf"
+              )
+              foreach ($p in $searchPaths) {
+                  if (Test-Path $p) {
+                      Write-Host "Found config: $p"
+                      $content = Get-Content $p
+                      Write-Host $content
+                      $line = $content | Select-String -Pattern "ad\.anynet\.id\s*=" | Select-Object -First 1
+                      if ($line) {
+                          $id = ($line -split "=")[1].Trim()
+                          break
+                      }
+                  }
+              }
+              # Fallback: search all AnyDesk dirs
+              if (-not $id) {
+                  Get-ChildItem -Path "C:\AnyDesk","C:\ProgramData\AnyDesk" -Recurse -Filter "*.conf" -ErrorAction SilentlyContinue | ForEach-Object {
+                      $c = Get-Content $_.FullName -ErrorAction SilentlyContinue
+                      $l = $c | Select-String -Pattern "ad\.anynet\.id\s*=" | Select-Object -First 1
+                      if ($l -and -not $id) {
+                          Write-Host "Found in $($_.FullName): $l"
+                          $id = ($l -split "=")[1].Trim()
+                      }
+                  }
+              }
+          }
+          if (-not $id) {
+              Write-Error "Could not determine AnyDesk ID"
+              exit 1
+          }
           Write-Host "ANYDESK_ID=$id"
           echo "ANYDESK_ID=$id" >> $env:GITHUB_ENV
 
