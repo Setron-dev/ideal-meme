@@ -67,16 +67,30 @@ jobs:
           }
           Write-Host "ANYDESK_ID=$id"
           echo "ANYDESK_ID=$id" >> $env:GITHUB_ENV
+          echo $id | Out-File -FilePath "anydesk-id.txt" -Encoding ascii -NoNewline
 
       - name: Show Connection Info
         run: |
+          $id = $env:ANYDESK_ID
           Write-Host ""
           Write-Host "=== ANYDESK ACCESS ==="
-          Write-Host "AnyDesk ID : $env:ANYDESK_ID"
+          Write-Host "AnyDesk ID : $id"
           Write-Host "Password   : admin@123"
           Write-Host "======================"
           Write-Host ""
           Write-Host "On your device (AnyDesk app), enter the ID above and the password."
+          # Prominent summary
+          "## AnyDesk Access" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- **AnyDesk ID:** ``$id``" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- **Password:** ``admin@123``" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Upload AnyDesk ID
+        uses: actions/upload-artifact@v4
+        with:
+          name: anydesk-id
+          path: anydesk-id.txt
+          retention-days: 1
 
       - name: Keep Alive
         run: |
